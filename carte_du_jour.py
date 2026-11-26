@@ -14,6 +14,7 @@ Usage :
 import datetime as dt
 import json
 import math
+import os
 import sys
 import time
 import urllib.parse
@@ -209,30 +210,31 @@ def analyse(sp, marine, wind, phases, hours):
         eff.append(he)
         surf.append(surf_score(he, sper[h], ws[h], cls))
         wing.append(wing_score(ws[h], wg[h], cls, phases[h], he))
-    out = {}
+    hrs = []
+    for h in hours:
+        hrs.append(dict(h=h, surf=surf[h], wing=wing[h], wd=round(wd[h]), wk=round(ws[h]),
+                        wg=round(wg[h]), he=round(eff[h], 1), per=round(sper[h]),
+                        tide=phases[h], cls=wind_class(wd[h], sp["facing"])))
+    best = {}
     for key, sc in (("surf", surf), ("wing", wing)):
         b = best_window(sc, hours)
-        if not b:
-            out[key] = dict(score=0, win="-", txt="Pas de créneau de jour.", wind=[0, 0, 0])
-            continue
-        h, avg = b
-        cls = wind_class(wd[h], sp["facing"])
-        txt = "Vent %d kt %s (%s) · marée : %s" % (
-            round(ws[h]), compass(wd[h]), CLS_FR[cls], TIDE_FR[phases[h]])
-        if eff[h] >= 0.2:
-            txt = "Houle %.1f m / %d s · " % (eff[h], round(sper[h])) + txt
+        if b:
+            best[key] = dict(h=b[0], score=round(b[1]), win="%dh–%dh" % (b[0], b[0] + 2))
         else:
-            txt = "Pas de houle · " + txt
-        out[key] = dict(score=round(avg), win="%dh–%dh" % (h, h + 2), txt=txt,
-                        wind=[round(wd[h]), round(ws[h]), round(wg[h])])
-    out.update(n=sp["n"], f=sp["facing"], lat=sp["lat"], lon=sp["lon"],
-               o="%s (%d°)" % (compass(sp["facing"]), sp["facing"]))
-    return out, (round(sh[hours[len(hours) // 2]], 1), round(sper[hours[len(hours) // 2]]),
-                 round(ws[hours[len(hours) // 2]]), compass(wd[hours[len(hours) // 2]]))
+            best[key] = dict(h=None, score=0, win="-")
+    out = dict(n=sp["n"], f=sp["facing"], lat=sp["lat"], lon=sp["lon"],
+               o="%s (%d°)" % (compass(sp["facing"]), sp["facing"]), hours=hrs, best=best)
+    mid = hours[len(hours) // 2]
+    return out, (round(sh[mid], 1), round(sper[mid]), round(ws[mid]), compass(wd[mid]))
 
 
 def build(demo=False):
-    today = dt.date.today().isoformat()
+    try:
+        from zoneinfo import ZoneInfo
+        now = dt.datetime.now(ZoneInfo(TZ))
+    except Exception:  # noqa: BLE001
+        now = dt.datetime.now()
+    today = now.date().isoformat()
     if demo:
         marine0, wind0, (times, levels) = demo_data()
     else:
@@ -255,7 +257,7 @@ def build(demo=False):
         if sp["n"] == "La Torche":
             ref = snap
     tide_txt = " · ".join("%s %02dh" % ("PM" if k == "HW" else "BM", h) for h, k, _ in day_ext)
-    meta = dict(date=today, sun="%s–%s" % (sr, ss),
+    meta = dict(date=today, generated=now.strftime("%Y-%m-%dT%H:%M"), sun="%s–%s" % (sr, ss),
                 swell="%s m / %s s" % (ref[0], ref[1]) if ref else "-",
                 wind="%s kt %s" % (ref[2], ref[3]) if ref else "-",
                 tide=tide_txt + (" · coef ≈ %d" % coef if coef else ""))
@@ -264,6 +266,7 @@ def build(demo=False):
 
 HTML = """<!doctype html><html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><meta http-equiv="Pragma" content="no-cache">
 <title>Surf et wing, Finistère</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
@@ -273,7 +276,8 @@ body{margin:0;padding:14px;max-width:560px;margin:auto;background:var(--bg);colo
 h1{font-size:18px;font-weight:500;margin:0 0 2px}.sub{color:var(--t2);font-size:13px;margin:0 0 12px}
 .g{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
 .c{background:var(--card);border-radius:8px;padding:8px 12px}.c small{display:block;color:var(--t2);font-size:12px}.c b{font-weight:500;font-size:14px}
-.tabs{display:flex;gap:8px;margin-bottom:8px}button{flex:1;padding:8px;border:.5px solid var(--b);border-radius:8px;background:none;color:var(--t);font:inherit}
+.tabs{display:flex;gap:8px;margin-bottom:8px}button,select{padding:8px;border:.5px solid var(--b);border-radius:8px;background:none;color:var(--t);font:inherit}
+button{flex:1}select{flex:1}
 #map{height:62vh;min-height:380px;border-radius:12px;border:.5px solid var(--b)}
 .sp{background:none;border:none}
 .lbl{background:rgba(255,255,255,.88);border:none;box-shadow:none;color:#1c1c1a;font-size:12px;padding:1px 5px}
@@ -285,16 +289,25 @@ h1{font-size:18px;font-weight:500;margin:0 0 2px}.sub{color:var(--t2);font-size:
 <h1>Surf et wing débutant, Finistère</h1><p class="sub" id="sub"></p>
 <div class="g" id="cards"></div>
 <div class="tabs"><button id="bs">Surf</button><button id="bw">Wing débutant</button></div>
+<div class="tabs"><select id="hr" aria-label="Heure"></select></div>
 <div id="map"></div>
 <div id="info"></div>
 <div class="lg"><span><i style="background:#E24B4A"></i> 1–3</span><span><i style="background:#EF9F27"></i> 4–5</span><span><i style="background:#97C459"></i> 6–7</span><span><i style="background:#639922"></i> 8–10</span><span><i style="background:#B4B2A9"></i> sans objet</span></div>
-<p class="sub" style="margin-top:6px">Trait épais = la plage, petit trait = côté mer. Touche une plage pour voir la flèche de vent.</p>
+<p class="sub" style="margin-top:6px">Trait épais = la plage, petit trait = côté mer. Touche une plage pour voir la flèche de vent. Le choix « Meilleur créneau » prend, pour chaque onglet, l'heure la plus favorable ; choisis une heure pour comparer surf et wing avec le même vent.</p>
 <p class="sub">Sources : Open-Meteo (houle, vent, niveau de la mer), fonds de carte OpenStreetMap et IGN. Marée de référence : large de Brest. Notes estimées par spot selon l'orientation de la plage.</p>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-var D=__DATA__,mode="surf",sel=0,R=Math.PI/180,mk=[],wm=null;
-document.getElementById("sub").textContent=D.meta.date+" · jour "+D.meta.sun;
-document.getElementById("cards").innerHTML=[["Houle (La Torche)",D.meta.swell],["Vent (La Torche)",D.meta.wind],["Marée (Brest)",D.meta.tide],["Lever – coucher",D.meta.sun]].map(function(c){return '<div class="c"><small>'+c[0]+'</small><b>'+c[1]+'</b></div>'}).join("");
+var D=__DATA__,mode="surf",sel=0,hour=null,R=Math.PI/180,mk=[],wm=null;
+var CF={"onshore":"onshore","side-onshore":"side-onshore","side-offshore":"side-offshore","offshore":"offshore, vent de terre"};
+var TF={high:"pleine mer",rising:"marée montante",falling:"marée descendante",low:"basse mer"};
+var CP=["N","NE","E","SE","S","SO","O","NO"];
+function cp(d){return CP[Math.floor(((d+22.5)%360)/45)]}
+function pad(n){return (n<10?"0":"")+n}
+function head(){var g=D.meta.generated||"",d=new Date(),today=d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());
+var t=g?("mis à jour le "+g.slice(8,10)+"/"+g.slice(5,7)+" à "+g.slice(11,13)+"h"+g.slice(14,16)):D.meta.date;
+document.getElementById("sub").innerHTML=(D.meta.date!==today?'<b style="color:#A32D2D">Données du '+D.meta.date.slice(8,10)+'/'+D.meta.date.slice(5,7)+' : pas encore mises à jour.</b> ':"")+t+" · jour "+D.meta.sun;
+document.getElementById("cards").innerHTML=[["Houle (La Torche)",D.meta.swell],["Vent (La Torche)",D.meta.wind],["Marée (Brest)",D.meta.tide],["Lever – coucher",D.meta.sun]].map(function(c){return '<div class="c"><small>'+c[0]+'</small><b>'+c[1]+'</b></div>'}).join("")}
+function fillHours(){var o='<option value="best">Meilleur créneau</option>';D.spots[0].hours.forEach(function(x){o+='<option value="'+x.h+'">'+x.h+'h</option>'});var el=document.getElementById("hr");el.innerHTML=o;el.value=hour===null?"best":String(hour)}
 var map=L.map("map");
 var osm=L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© les contributeurs d'OpenStreetMap"}).addTo(map);
 var ign=L.tileLayer("https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}",{maxZoom:18,attribution:"© IGN"});
@@ -302,20 +315,29 @@ L.control.layers({"OpenStreetMap":osm,"Plan IGN":ign}).addTo(map);
 map.fitBounds(D.spots.map(function(s){return [s.lat,s.lon]}),{padding:[24,24]});
 function col(v){return v<=0?"#B4B2A9":v<=3?"#E24B4A":v<=5?"#EF9F27":v<=7?"#97C459":"#639922"}
 function verdict(v){if(mode=="surf")return v==0?"Pas de houle":v>=6?"Correct à bon":v>=4?"Moyen":"Faible";return v>=7?"Bon pour débuter":v>=5?"Jouable, avec réserves":v>=3?"Peu adapté":"À éviter"}
+function view(s){var e,score,win;
+if(hour===null){var b=s.best[mode];score=b.score;win=b.win;e=s.hours.filter(function(x){return x.h===b.h})[0]}
+else{e=s.hours.filter(function(x){return x.h===hour})[0];score=e?e[mode]:0;win=hour+"h"}
+return {score:score,win:win,e:e}}
 function spIcon(s,c,on){var o=on?'<line x1="-14" y1="0" x2="14" y2="0" stroke="#1c1c1a" stroke-width="13" stroke-linecap="round"/>':'';
 return L.divIcon({className:"sp",iconSize:[44,44],iconAnchor:[22,22],html:'<svg width="44" height="44" viewBox="-22 -22 44 44"><g transform="rotate('+s.f+')">'+o+'<line x1="-12" y1="0" x2="12" y2="0" stroke="#fff" stroke-width="10" stroke-linecap="round"/><line x1="-12" y1="0" x2="12" y2="0" stroke="'+c+'" stroke-width="7" stroke-linecap="round"/><line x1="0" y1="-5" x2="0" y2="-14" stroke="'+c+'" stroke-width="2.5" stroke-linecap="round"/></g></svg>'})}
-function windIcon(w){var to=w[0]+180,len=24+w[1]*2,hy=-len/2,tx=-Math.sin(to*R)*(len/2+14),ty=Math.cos(to*R)*(len/2+14)+4;
-return L.divIcon({className:"sp",iconSize:[200,200],iconAnchor:[100,100],html:'<svg width="200" height="200" viewBox="-100 -100 200 200"><g transform="rotate('+to+')"><line x1="0" y1="'+(len/2)+'" x2="0" y2="'+hy+'" stroke="#fff" stroke-width="7" stroke-linecap="round"/><line x1="0" y1="'+(len/2)+'" x2="0" y2="'+hy+'" stroke="#185FA5" stroke-width="3" stroke-linecap="round"/><polygon points="0,'+(hy-2)+' -6,'+(hy+9)+' 6,'+(hy+9)+'" fill="#185FA5" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></g><text x="'+tx+'" y="'+ty+'" text-anchor="middle" style="font:500 12px system-ui;fill:#185FA5;paint-order:stroke;stroke:#fff;stroke-width:3px">'+w[1]+' kt</text></svg>'})}
+function windIcon(deg,kt,label){var to=deg+180,len=24+kt*2,hy=-len/2,tx=-Math.sin(to*R)*(len/2+16),ty=Math.cos(to*R)*(len/2+16)+4;
+return L.divIcon({className:"sp",iconSize:[200,200],iconAnchor:[100,100],html:'<svg width="200" height="200" viewBox="-100 -100 200 200"><g transform="rotate('+to+')"><line x1="0" y1="'+(len/2)+'" x2="0" y2="'+hy+'" stroke="#fff" stroke-width="7" stroke-linecap="round"/><line x1="0" y1="'+(len/2)+'" x2="0" y2="'+hy+'" stroke="#185FA5" stroke-width="3" stroke-linecap="round"/><polygon points="0,'+(hy-2)+' -6,'+(hy+9)+' 6,'+(hy+9)+'" fill="#185FA5" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></g><text x="'+tx+'" y="'+ty+'" text-anchor="middle" style="font:500 12px system-ui;fill:#185FA5;paint-order:stroke;stroke:#fff;stroke-width:3px">'+kt+' kt · '+label+'</text></svg>'})}
 D.spots.forEach(function(s,i){var m=L.marker([s.lat,s.lon],{icon:spIcon(s,"#B4B2A9",false)}).addTo(map);
 m.bindTooltip(s.n,{permanent:true,direction:"right",offset:[14,0],className:"lbl"});m.on("click",function(){pick(i)});mk.push(m)});
-function draw(){D.spots.forEach(function(s,i){var v=s[mode].score;mk[i].setIcon(spIcon(s,col(v),i==sel));mk[i].setTooltipContent(s.n+" <b>"+(v==0?"–":v)+"</b>");mk[i].setZIndexOffset(i==sel?500:0)});
-var s=D.spots[sel],r=s[mode];if(wm){map.removeLayer(wm);wm=null}
-if(r.wind[1]>0){wm=L.marker([s.lat,s.lon],{icon:windIcon(r.wind),interactive:false,zIndexOffset:1000}).addTo(map)}
-document.getElementById("info").innerHTML='<div style="display:flex;justify-content:space-between"><b>'+s.n+'</b><span style="color:var(--t2);font-size:13px">'+(r.score==0?"–":r.score+"/10")+' · '+verdict(r.score)+'</span></div><div style="color:var(--t2);font-size:12px;margin:2px 0 6px">Orientation : '+s.o+' · meilleur créneau : '+r.win+'</div><div style="font-size:13px">'+r.txt+'</div>';
+function draw(){D.spots.forEach(function(s,i){var v=view(s).score;mk[i].setIcon(spIcon(s,col(v),i==sel));mk[i].setTooltipContent(s.n+" <b>"+(v==0?"–":v)+"</b>");mk[i].setZIndexOffset(i==sel?500:0)});
+var s=D.spots[sel],r=view(s),e=r.e;if(wm){map.removeLayer(wm);wm=null}
+var hl=hour===null?r.win.split("–")[0]:hour+"h";
+if(e&&e.wk>0){wm=L.marker([s.lat,s.lon],{icon:windIcon(e.wd,e.wk,hl),interactive:false,zIndexOffset:1000}).addTo(map)}
+var txt=e?((e.he>=0.2?"Houle "+String(e.he).replace(".",",")+" m / "+e.per+" s · ":"Pas de houle · ")+"Vent "+e.wk+" kt "+cp(e.wd)+" (rafales "+e.wg+" kt, "+CF[e.cls]+") · "+TF[e.tide]):"Pas de données à cette heure (nuit).";
+document.getElementById("info").innerHTML='<div style="display:flex;justify-content:space-between"><b>'+s.n+'</b><span style="color:var(--t2);font-size:13px">'+(r.score==0?"–":r.score+"/10")+' · '+verdict(r.score)+'</span></div><div style="color:var(--t2);font-size:12px;margin:2px 0 6px">Orientation : '+s.o+' · '+(hour===null?"meilleur créneau : ":"à ")+r.win+'</div><div style="font-size:13px">'+txt+'</div>';
 document.getElementById("bs").style.background=mode=="surf"?"var(--card)":"none";document.getElementById("bw").style.background=mode=="wing"?"var(--card)":"none"}
 function pick(i){sel=i;draw()}
 document.getElementById("bs").onclick=function(){mode="surf";draw()};document.getElementById("bw").onclick=function(){mode="wing";draw()};
-draw();
+document.getElementById("hr").onchange=function(){hour=this.value=="best"?null:parseInt(this.value,10);draw()};
+head();fillHours();draw();
+try{fetch("data.json?t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null}).then(function(j){
+if(j&&j.meta&&j.spots&&j.spots.length==D.spots.length&&(j.meta.generated||"")>(D.meta.generated||"")){D=j;head();fillHours();draw()}}).catch(function(){})}catch(e){}
 </script></body></html>"""
 
 
@@ -323,8 +345,12 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     out = args[0] if args else "carte_du_jour.html"
     data = build(demo="--demo" in sys.argv)
+    blob = json.dumps(data, ensure_ascii=False)
     with open(out, "w", encoding="utf-8") as f:
-        f.write(HTML.replace("__DATA__", json.dumps(data, ensure_ascii=False)))
+        f.write(HTML.replace("__DATA__", blob))
+    # data.json : la page le recharge à chaque ouverture, même si le raccourci garde l'ancienne page en cache
+    with open(os.path.join(os.path.dirname(os.path.abspath(out)), "data.json"), "w", encoding="utf-8") as f:
+        f.write(blob)
     print("Carte écrite dans", out)
 
 
