@@ -75,13 +75,13 @@ def get(url, params):
 
 def fetch_marine(sp):
     return get("https://marine-api.open-meteo.com/v1/marine", dict(
-        latitude=sp["lat"], longitude=sp["lon"], timezone=TZ, forecast_days=1,
+        latitude=sp["lat"], longitude=sp["lon"], timezone=TZ, forecast_days=2,
         hourly="swell_wave_height,swell_wave_period,swell_wave_direction"))
 
 
 def fetch_wind(sp):
     return get("https://api.open-meteo.com/v1/forecast", dict(
-        latitude=sp["lat"], longitude=sp["lon"], timezone=TZ, forecast_days=1,
+        latitude=sp["lat"], longitude=sp["lon"], timezone=TZ, forecast_days=2,
         wind_speed_unit="kn", daily="sunrise,sunset",
         hourly="wind_speed_10m,wind_gusts_10m,wind_direction_10m"))
 
@@ -89,14 +89,14 @@ def fetch_wind(sp):
 def fetch_tide():
     d = get("https://marine-api.open-meteo.com/v1/marine", dict(
         latitude=TIDE_REF[0], longitude=TIDE_REF[1], timezone=TZ,
-        past_days=1, forecast_days=2, hourly="sea_level_height_msl"))
+        past_days=1, forecast_days=3, hourly="sea_level_height_msl"))
     return d["hourly"]["time"], [v if v is not None else 0 for v in d["hourly"]["sea_level_height_msl"]]
 
 
 def demo_data():
     """Données fictives réalistes pour tester le script sans réseau."""
     def day(f):
-        return [f(h) for h in range(24)]
+        return [f(h) for h in range(48)]
     marine = {"hourly": {
         "swell_wave_height": day(lambda h: 1.4 + 0.2 * math.sin(h / 4)),
         "swell_wave_period": day(lambda h: 11),
@@ -104,11 +104,12 @@ def demo_data():
     wind = {"hourly": {
         "wind_speed_10m": day(lambda h: 15 - 3 * math.cos(h / 4)),
         "wind_gusts_10m": day(lambda h: 21),
-        "wind_direction_10m": day(lambda h: 0)},
-        "daily": {"sunrise": ["2026-11-25T08:41"], "sunset": ["2026-11-25T17:28"]}}
+        "wind_direction_10m": day(lambda h: 0 if h < 24 else 270)},
+        "daily": {"sunrise": ["2026-11-25T08:41", "2026-11-26T08:43"],
+                  "sunset": ["2026-11-25T17:28", "2026-11-26T17:27"]}}
     today = dt.date.today()
     times, lv = [], []
-    for i in range(72):
+    for i in range(96):
         t = dt.datetime.combine(today, dt.time()) + dt.timedelta(hours=i - 24)
         times.append(t.strftime("%Y-%m-%dT%H:00"))
         lv.append(3.0 * math.sin(2 * math.pi * (i - 24 - 5) / 12.42))
@@ -198,11 +199,11 @@ def best_window(scores, hours):
     return best
 
 
-def analyse(sp, marine, wind, phases, hours):
+def analyse(sp, marine, wind, phases, hours, off=0):
     m, w = marine["hourly"], wind["hourly"]
     z = lambda a: [v if v is not None else 0 for v in a]  # noqa: E731
-    sh, sper, sdir = z(m["swell_wave_height"]), z(m["swell_wave_period"]), z(m["swell_wave_direction"])
-    ws, wg, wd = z(w["wind_speed_10m"]), z(w["wind_gusts_10m"]), z(w["wind_direction_10m"])
+    sh, sper, sdir = z(m["swell_wave_height"][off:off+24]), z(m["swell_wave_period"][off:off+24]), z(m["swell_wave_direction"][off:off+24])
+    ws, wg, wd = z(w["wind_speed_10m"][off:off+24]), z(w["wind_gusts_10m"][off:off+24]), z(w["wind_direction_10m"][off:off+24])
     surf, wing, eff = [], [], []
     for h in range(24):
         he = effective_height(sh[h], sdir[h], sp["facing"], sp["expo"])
@@ -234,34 +235,38 @@ def build(demo=False):
         now = dt.datetime.now(ZoneInfo(TZ))
     except Exception:  # noqa: BLE001
         now = dt.datetime.now()
-    today = now.date().isoformat()
+    today = now.date()
     if demo:
         marine0, wind0, (times, levels) = demo_data()
     else:
         times, levels = fetch_tide()
-    phases, day_ext, coef = tide_phases(times, levels, today)
-
-    results, ref = [], None
-    hours = list(range(8, 18))
+    raw = []
     for sp in SPOTS:
         if demo:
-            marine, wind = marine0, wind0
+            raw.append((marine0, wind0))
         else:
-            marine, wind = fetch_marine(sp), fetch_wind(sp)
+            raw.append((fetch_marine(sp), fetch_wind(sp)))
             time.sleep(0.3)
-        sr = wind["daily"]["sunrise"][0][11:16]
-        ss = wind["daily"]["sunset"][0][11:16]
-        hours = [h for h in range(24) if int(sr[:2]) <= h <= int(ss[:2]) - 1]
-        res, snap = analyse(sp, marine, wind, phases, hours)
-        results.append(res)
-        if sp["n"] == "La Torche":
-            ref = snap
-    tide_txt = " · ".join("%s %02dh" % ("PM" if k == "HW" else "BM", h) for h, k, _ in day_ext)
-    meta = dict(date=today, generated=now.strftime("%Y-%m-%dT%H:%M"), sun="%s–%s" % (sr, ss),
-                swell="%s m / %s s" % (ref[0], ref[1]) if ref else "-",
-                wind="%s kt %s" % (ref[2], ref[3]) if ref else "-",
-                tide=tide_txt + (" · coef ≈ %d" % coef if coef else ""))
-    return dict(meta=meta, spots=results)
+    days = []
+    for off in range(2):
+        date = (today + dt.timedelta(days=off)).isoformat()
+        phases, day_ext, coef = tide_phases(times, levels, date)
+        results, ref = [], None
+        for sp, (marine, wind) in zip(SPOTS, raw):
+            sr = wind["daily"]["sunrise"][off][11:16]
+            ss = wind["daily"]["sunset"][off][11:16]
+            hours = [h for h in range(24) if int(sr[:2]) <= h <= int(ss[:2]) - 1]
+            res, snap = analyse(sp, marine, wind, phases, hours, off * 24)
+            results.append(res)
+            if sp["n"] == "La Torche":
+                ref = snap
+        tide_txt = " · ".join("%s %02dh" % ("PM" if k == "HW" else "BM", h) for h, k, _ in day_ext)
+        meta = dict(date=date, sun="%s–%s" % (sr, ss),
+                    swell="%s m / %s s" % (ref[0], ref[1]) if ref else "-",
+                    wind="%s kt %s" % (ref[2], ref[3]) if ref else "-",
+                    tide=tide_txt + (" · coef ≈ %d" % coef if coef else ""))
+        days.append(dict(meta=meta, spots=results))
+    return dict(generated=now.strftime("%Y-%m-%dT%H:%M"), days=days)
 
 
 HTML = """<!doctype html><html lang="fr"><head><meta charset="utf-8">
@@ -288,31 +293,37 @@ button{flex:1}select{flex:1}
 </style></head><body>
 <h1>Surf et wing débutant, Finistère</h1><p class="sub" id="sub"></p>
 <div class="g" id="cards"></div>
+<div class="tabs"><button id="bd0"></button><button id="bd1"></button></div>
 <div class="tabs"><button id="bs">Surf</button><button id="bw">Wing débutant</button></div>
 <div class="tabs"><select id="hr" aria-label="Heure"></select></div>
 <div id="map"></div>
 <div id="info"></div>
 <div class="lg"><span><i style="background:#E24B4A"></i> 1–3</span><span><i style="background:#EF9F27"></i> 4–5</span><span><i style="background:#97C459"></i> 6–7</span><span><i style="background:#639922"></i> 8–10</span><span><i style="background:#B4B2A9"></i> sans objet</span></div>
-<p class="sub" style="margin-top:6px">Trait épais = la plage, petit trait = côté mer. Touche une plage pour voir la flèche de vent. Le choix « Meilleur créneau » prend, pour chaque onglet, l'heure la plus favorable ; choisis une heure pour comparer surf et wing avec le même vent.</p>
+<p class="sub" style="margin-top:6px">Trait épais = la plage, petit trait = côté mer. Touche une plage pour voir la flèche de vent. Les boutons du haut changent de jour. Le choix « Meilleur créneau » prend, pour chaque onglet, l'heure la plus favorable ; choisis une heure pour comparer surf et wing avec le même vent.</p>
 <p class="sub">Sources : Open-Meteo (houle, vent, niveau de la mer), fonds de carte OpenStreetMap et IGN. Marée de référence : large de Brest. Notes estimées par spot selon l'orientation de la plage.</p>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-var D=__DATA__,mode="surf",sel=0,hour=null,R=Math.PI/180,mk=[],wm=null;
+var D=__DATA__,day=0,mode="surf",sel=0,hour=null,R=Math.PI/180,mk=[],wm=null;
 var CF={"onshore":"onshore","side-onshore":"side-onshore","side-offshore":"side-offshore","offshore":"offshore, vent de terre"};
 var TF={high:"pleine mer",rising:"marée montante",falling:"marée descendante",low:"basse mer"};
 var CP=["N","NE","E","SE","S","SO","O","NO"];
 function cp(d){return CP[Math.floor(((d+22.5)%360)/45)]}
 function pad(n){return (n<10?"0":"")+n}
-function head(){var g=D.meta.generated||"",d=new Date(),today=d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());
-var t=g?("mis à jour le "+g.slice(8,10)+"/"+g.slice(5,7)+" à "+g.slice(11,13)+"h"+g.slice(14,16)):D.meta.date;
-document.getElementById("sub").innerHTML=(D.meta.date!==today?'<b style="color:#A32D2D">Données du '+D.meta.date.slice(8,10)+'/'+D.meta.date.slice(5,7)+' : pas encore mises à jour.</b> ':"")+t+" · jour "+D.meta.sun;
-document.getElementById("cards").innerHTML=[["Houle (La Torche)",D.meta.swell],["Vent (La Torche)",D.meta.wind],["Marée (Brest)",D.meta.tide],["Lever – coucher",D.meta.sun]].map(function(c){return '<div class="c"><small>'+c[0]+'</small><b>'+c[1]+'</b></div>'}).join("")}
-function fillHours(){var o='<option value="best">Meilleur créneau</option>';D.spots[0].hours.forEach(function(x){o+='<option value="'+x.h+'">'+x.h+'h</option>'});var el=document.getElementById("hr");el.innerHTML=o;el.value=hour===null?"best":String(hour)}
+function cur(){return D.days[day]}
+function ymd(d){return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())}
+function dl(date){var d=new Date();if(date===ymd(d))return "Aujourd'hui";if(date===ymd(new Date(d.getTime()+864e5)))return "Demain";return date.slice(8,10)+"/"+date.slice(5,7)}
+function setDay(){var t=ymd(new Date());day=(D.days[0].meta.date<t&&D.days[1]&&D.days[1].meta.date===t)?1:0}
+function head(){var g=D.generated||"",t0=ymd(new Date()),m=cur().meta,
+t=g?("mis à jour le "+g.slice(8,10)+"/"+g.slice(5,7)+" à "+g.slice(11,13)+"h"+g.slice(14,16)):m.date;
+document.getElementById("sub").innerHTML=(D.days[0].meta.date<t0?'<b style="color:#A32D2D">Données du '+D.days[0].meta.date.slice(8,10)+'/'+D.days[0].meta.date.slice(5,7)+' : pas encore mises à jour.</b> ':"")+t+" · jour "+m.sun;
+document.getElementById("cards").innerHTML=[["Houle (La Torche)",m.swell],["Vent (La Torche)",m.wind],["Marée (Brest)",m.tide],["Lever – coucher",m.sun]].map(function(c){return '<div class="c"><small>'+c[0]+'</small><b>'+c[1]+'</b></div>'}).join("");
+[0,1].forEach(function(i){var b=document.getElementById("bd"+i);b.textContent=dl(D.days[i].meta.date);b.style.background=day==i?"var(--card)":"none";b.style.fontWeight=day==i?"500":"400"})}
+function fillHours(){var o='<option value="best">Meilleur créneau</option>';cur().spots[0].hours.forEach(function(x){o+='<option value="'+x.h+'">'+x.h+'h</option>'});var el=document.getElementById("hr");el.innerHTML=o;el.value=hour===null?"best":String(hour)}
 var map=L.map("map");
 var osm=L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© les contributeurs d'OpenStreetMap"}).addTo(map);
 var ign=L.tileLayer("https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}",{maxZoom:18,attribution:"© IGN"});
 L.control.layers({"OpenStreetMap":osm,"Plan IGN":ign}).addTo(map);
-map.fitBounds(D.spots.map(function(s){return [s.lat,s.lon]}),{padding:[24,24]});
+map.fitBounds(D.days[0].spots.map(function(s){return [s.lat,s.lon]}),{padding:[24,24]});
 function col(v){return v<=0?"#B4B2A9":v<=3?"#E24B4A":v<=5?"#EF9F27":v<=7?"#97C459":"#639922"}
 function verdict(v){if(mode=="surf")return v==0?"Pas de houle":v>=6?"Correct à bon":v>=4?"Moyen":"Faible";return v>=7?"Bon pour débuter":v>=5?"Jouable, avec réserves":v>=3?"Peu adapté":"À éviter"}
 function view(s){var e,score,win;
@@ -323,10 +334,10 @@ function spIcon(s,c,on){var o=on?'<line x1="-14" y1="0" x2="14" y2="0" stroke="#
 return L.divIcon({className:"sp",iconSize:[44,44],iconAnchor:[22,22],html:'<svg width="44" height="44" viewBox="-22 -22 44 44"><g transform="rotate('+s.f+')">'+o+'<line x1="-12" y1="0" x2="12" y2="0" stroke="#fff" stroke-width="10" stroke-linecap="round"/><line x1="-12" y1="0" x2="12" y2="0" stroke="'+c+'" stroke-width="7" stroke-linecap="round"/><line x1="0" y1="-5" x2="0" y2="-14" stroke="'+c+'" stroke-width="2.5" stroke-linecap="round"/></g></svg>'})}
 function windIcon(deg,kt,label){var to=deg+180,len=24+kt*2,hy=-len/2,tx=-Math.sin(to*R)*(len/2+16),ty=Math.cos(to*R)*(len/2+16)+4;
 return L.divIcon({className:"sp",iconSize:[200,200],iconAnchor:[100,100],html:'<svg width="200" height="200" viewBox="-100 -100 200 200"><g transform="rotate('+to+')"><line x1="0" y1="'+(len/2)+'" x2="0" y2="'+hy+'" stroke="#fff" stroke-width="7" stroke-linecap="round"/><line x1="0" y1="'+(len/2)+'" x2="0" y2="'+hy+'" stroke="#185FA5" stroke-width="3" stroke-linecap="round"/><polygon points="0,'+(hy-2)+' -6,'+(hy+9)+' 6,'+(hy+9)+'" fill="#185FA5" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></g><text x="'+tx+'" y="'+ty+'" text-anchor="middle" style="font:500 12px system-ui;fill:#185FA5;paint-order:stroke;stroke:#fff;stroke-width:3px">'+kt+' kt · '+label+'</text></svg>'})}
-D.spots.forEach(function(s,i){var m=L.marker([s.lat,s.lon],{icon:spIcon(s,"#B4B2A9",false)}).addTo(map);
+D.days[0].spots.forEach(function(s,i){var m=L.marker([s.lat,s.lon],{icon:spIcon(s,"#B4B2A9",false)}).addTo(map);
 m.bindTooltip(s.n,{permanent:true,direction:"right",offset:[14,0],className:"lbl"});m.on("click",function(){pick(i)});mk.push(m)});
-function draw(){D.spots.forEach(function(s,i){var v=view(s).score;mk[i].setIcon(spIcon(s,col(v),i==sel));mk[i].setTooltipContent(s.n+" <b>"+(v==0?"–":v)+"</b>");mk[i].setZIndexOffset(i==sel?500:0)});
-var s=D.spots[sel],r=view(s),e=r.e;if(wm){map.removeLayer(wm);wm=null}
+function draw(){cur().spots.forEach(function(s,i){var v=view(s).score;mk[i].setIcon(spIcon(s,col(v),i==sel));mk[i].setTooltipContent(s.n+" <b>"+(v==0?"–":v)+"</b>");mk[i].setZIndexOffset(i==sel?500:0)});
+var s=cur().spots[sel],r=view(s),e=r.e;if(wm){map.removeLayer(wm);wm=null}
 var hl=hour===null?r.win.split("–")[0]:hour+"h";
 if(e&&e.wk>0){wm=L.marker([s.lat,s.lon],{icon:windIcon(e.wd,e.wk,hl),interactive:false,zIndexOffset:1000}).addTo(map)}
 var txt=e?((e.he>=0.2?"Houle "+String(e.he).replace(".",",")+" m / "+e.per+" s · ":"Pas de houle · ")+"Vent "+e.wk+" kt "+cp(e.wd)+" (rafales "+e.wg+" kt, "+CF[e.cls]+") · "+TF[e.tide]):"Pas de données à cette heure (nuit).";
@@ -334,10 +345,11 @@ document.getElementById("info").innerHTML='<div style="display:flex;justify-cont
 document.getElementById("bs").style.background=mode=="surf"?"var(--card)":"none";document.getElementById("bw").style.background=mode=="wing"?"var(--card)":"none"}
 function pick(i){sel=i;draw()}
 document.getElementById("bs").onclick=function(){mode="surf";draw()};document.getElementById("bw").onclick=function(){mode="wing";draw()};
+[0,1].forEach(function(i){document.getElementById("bd"+i).onclick=function(){day=i;if(hour!==null&&!cur().spots[0].hours.some(function(x){return x.h===hour}))hour=null;head();fillHours();draw()}});
 document.getElementById("hr").onchange=function(){hour=this.value=="best"?null:parseInt(this.value,10);draw()};
-head();fillHours();draw();
+setDay();head();fillHours();draw();
 try{fetch("data.json?t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null}).then(function(j){
-if(j&&j.meta&&j.spots&&j.spots.length==D.spots.length&&(j.meta.generated||"")>(D.meta.generated||"")){D=j;head();fillHours();draw()}}).catch(function(){})}catch(e){}
+if(j&&j.days&&j.days.length==D.days.length&&j.days[0].spots.length==D.days[0].spots.length&&(j.generated||"")>(D.generated||"")){D=j;setDay();head();fillHours();draw()}}).catch(function(){})}catch(e){}
 </script></body></html>"""
 
 
