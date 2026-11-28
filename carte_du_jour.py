@@ -39,6 +39,9 @@ SPOTS = [
     dict(n="Keremma", lat=48.6535886, lon=-4.2560421, facing=0, expo=0.5),
     dict(n="Brignogan", lat=48.6521627, lon=-4.2991499, facing=90, expo=0.6),
     dict(n="Kerlouan", lat=48.6689601, lon=-4.3683898, facing=0, expo=0.6),
+    dict(n="Kerdrein", lat=48.3566935, lon=-4.4362805, facing=270, expo=0.0),
+    dict(n="Kernisi", lat=48.3666696, lon=-4.4256539, facing=0, expo=0.0),
+    dict(n="Vougot", lat=48.6281978, lon=-4.4629849, facing=315, expo=0.7),
 ]
 
 COMPASS = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"]
